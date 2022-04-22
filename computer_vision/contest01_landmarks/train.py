@@ -15,13 +15,13 @@ from torch.nn import functional as fnn
 from torch.utils.data import DataLoader
 from torchvision import transforms
 
-from utils import NUM_PTS, CROP_SIZE
+from utils import NUM_PTS, CROP_SIZE, DATASET_MEAN, DATASET_STD
 from utils import ScaleMinSideToSize, CropCenter, TransformByKeys
 from utils import ThousandLandmarksDataset
 from utils import restore_landmarks_batch, create_submission
 
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
+# torch.backends.cudnn.deterministic = True
+# torch.backends.cudnn.benchmark = False
 
 
 def parse_arguments():
@@ -97,7 +97,7 @@ def main(args):
         CropCenter(CROP_SIZE),
         TransformByKeys(transforms.ToPILImage(), ("image",)),
         TransformByKeys(transforms.ToTensor(), ("image",)),
-        TransformByKeys(transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.25, 0.25, 0.25]), ("image",)),
+        TransformByKeys(transforms.Normalize(mean=DATASET_MEAN, std=DATASET_STD), ("image",)),
     ])
 
     print("Reading data...")
@@ -112,7 +112,7 @@ def main(args):
 
     print("Creating model...")
     model = models.resnet18(pretrained=True)
-    model.requires_grad_(False)
+    model.requires_grad_(True)
 
     model.fc = nn.Linear(model.fc.in_features, 2 * NUM_PTS, bias=True)
     model.fc.requires_grad_(True)
