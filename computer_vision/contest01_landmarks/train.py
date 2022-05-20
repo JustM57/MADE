@@ -102,25 +102,43 @@ def main(args):
 
     print("Reading data...")
     train_dataset = ThousandLandmarksDataset(os.path.join(args.data, "train"), train_transforms, split="train")
-    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=4, pin_memory=True,
+    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=8, pin_memory=True,
                                   shuffle=True, drop_last=True)
     val_dataset = ThousandLandmarksDataset(os.path.join(args.data, "train"), train_transforms, split="val")
-    val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, num_workers=4, pin_memory=True,
+    val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, num_workers=8, pin_memory=True,
                                 shuffle=False, drop_last=False)
 
     device = torch.device("cuda:0") if args.gpu and torch.cuda.is_available() else torch.device("cpu")
 
     print("Creating model...")
-    model = models.resnet18(pretrained=True)
+    # model = models.resnet34(pretrained=True)
+    model = models.regnet_x_800mf(pretrained=True)
     model.requires_grad_(True)
 
     model.fc = nn.Linear(model.fc.in_features, 2 * NUM_PTS, bias=True)
     model.fc.requires_grad_(True)
 
+    # model = models.efficientnet_b2(pretrained=True)
+    # model.requires_grad_(True)
+    # model.classifier = nn.Sequential(
+    #     nn.Dropout(p=0.3, inplace=True),
+    #     nn.Linear(in_features=1408, out_features=2 * NUM_PTS, bias=True)
+    # )
+    # model.classifier.requires_grad_(True)
+
     model.to(device)
 
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, amsgrad=True)
-    loss_fn = fnn.mse_loss
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer=optimizer,
+        mode='min',
+        factor=0.2,
+        cooldown=4,
+        patience=2,
+        verbose=True
+    )
+    # loss_fn = fnn.mse_loss
+    loss_fn = fnn.l1_loss
 
     # 2. train & validate
     print("Ready for training...")
@@ -128,7 +146,8 @@ def main(args):
     for epoch in range(args.epochs):
         train_loss = train(model, train_dataloader, loss_fn, optimizer, device=device)
         val_loss = validate(model, val_dataloader, loss_fn, device=device)
-        print("Epoch #{:2}:\ttrain loss: {:5.2}\tval loss: {:5.2}".format(epoch, train_loss, val_loss))
+        scheduler.step(val_loss)
+        print(f"Epoch #{epoch}:\ttrain loss: {round(train_loss, 3)}\tval loss: {round(val_loss, 3)}")
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             with open(os.path.join("runs", f"{args.name}_best.pth"), "wb") as fp:
@@ -136,7 +155,7 @@ def main(args):
 
     # 3. predict
     test_dataset = ThousandLandmarksDataset(os.path.join(args.data, "test"), train_transforms, split="test")
-    test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=4, pin_memory=True,
+    test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=8, pin_memory=True,
                                  shuffle=False, drop_last=False)
 
     with open(os.path.join("runs", f"{args.name}_best.pth"), "rb") as fp:

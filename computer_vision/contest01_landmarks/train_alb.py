@@ -13,15 +13,16 @@ import torchvision.models as models
 import tqdm
 from torch.nn import functional as fnn
 from torch.utils.data import DataLoader
-from torchvision import transforms
+from torch.cuda.amp import autocast, GradScaler
+from augmentations import test_transforms, image_augmentations, key_points_augmentations
 
-from utils import NUM_PTS, CROP_SIZE, DATASET_MEAN, DATASET_STD
-from utils import ScaleMinSideToSize, CropCenter, TransformByKeys
+from utils import NUM_PTS
 from utils import ThousandLandmarksDataset
 from utils import restore_landmarks_batch, create_submission
 
 # torch.backends.cudnn.deterministic = True
 # torch.backends.cudnn.benchmark = False
+scaler = GradScaler()
 
 
 def parse_arguments():
@@ -36,37 +37,55 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def train(model, loader, loss_fn, optimizer, device):
+def train(model, loader, loss_fn, optimizer, device, scheduler=None):
     model.train()
     train_loss = []
-    for batch in tqdm.tqdm(loader, total=len(loader), desc="training..."):
+    for batch in tqdm.tqdm(loader, total=len(loader), desc="training...", position=0, leave=True):
         images = batch["image"].to(device)  # B x 3 x CROP_SIZE x CROP_SIZE
-        landmarks = batch["landmarks"]  # B x (2 * NUM_PTS)
+        landmarks = batch["landmarks"].to(device)  # B x (2 * NUM_PTS)
+        with autocast():
+            pred_landmarks = model(images)  # B x (2 * NUM_PTS)
+            loss = loss_fn(pred_landmarks, landmarks, reduction="mean")
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
-        pred_landmarks = model(images).cpu()  # B x (2 * NUM_PTS)
-        loss = loss_fn(pred_landmarks, landmarks, reduction="mean")
         train_loss.append(loss.item())
-
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        if scheduler:
+            scheduler.step()
 
     return np.mean(train_loss)
 
 
 def validate(model, loader, loss_fn, device):
     model.eval()
-    val_loss = []
+    val_loss, real_val_loss = [], []
     for batch in tqdm.tqdm(loader, total=len(loader), desc="validation..."):
         images = batch["image"].to(device)
-        landmarks = batch["landmarks"]
+        landmarks = batch["landmarks"].to(device)
 
         with torch.no_grad():
-            pred_landmarks = model(images).cpu()
+            pred_landmarks = model(images)
         loss = loss_fn(pred_landmarks, landmarks, reduction="mean")
         val_loss.append(loss.item())
 
-    return np.mean(val_loss)
+        # Расчет "правильного" лосса
+        fs = batch["scale_coef"].numpy()
+        # Вытаскиваем инфо о кромках
+        margins_x = batch["crop_margin_x"].numpy()
+        margins_y = batch["crop_margin_y"].numpy()
+        # Пересчитываем в исходные координаты предсказания модели
+        pred_landmarks = pred_landmarks.cpu().numpy().reshape((len(pred_landmarks), NUM_PTS, 2))
+        prediction = restore_landmarks_batch(pred_landmarks, fs, margins_x, margins_y)
+        # Пересчитываем в исходные координаты ground_true - координаты
+        landmarks = landmarks.cpu().numpy().reshape((len(pred_landmarks), NUM_PTS, 2))
+        real_landmarks = restore_landmarks_batch(landmarks, fs, margins_x, margins_y)
+        # Добавяем MSE в список real_val_loss
+        real_loss = (prediction.reshape(-1) - real_landmarks.reshape(-1)) ** 2
+        real_val_loss.append(np.mean(real_loss))
+
+    return np.mean(val_loss), np.mean(real_val_loss)
 
 
 def predict(model, loader, device):
@@ -92,70 +111,80 @@ def main(args):
     os.makedirs("runs", exist_ok=True)
 
     # 1. prepare data & models
-    train_transforms = transforms.Compose([
-        ScaleMinSideToSize((CROP_SIZE, CROP_SIZE)),
-        CropCenter(CROP_SIZE),
-        TransformByKeys(transforms.ToPILImage(), ("image",)),
-        TransformByKeys(transforms.ToTensor(), ("image",)),
-        TransformByKeys(transforms.Normalize(mean=DATASET_MEAN, std=DATASET_STD), ("image",)),
-    ])
 
     print("Reading data...")
-    train_dataset = ThousandLandmarksDataset(os.path.join(args.data, "train"), train_transforms, split="train")
-    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=8, pin_memory=True,
+    train_dataset = ThousandLandmarksDataset(
+        os.path.join(args.data, "train"), test_transforms, image_augmentations=image_augmentations,
+        key_points_augmentations=key_points_augmentations, split="train")
+    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=11, pin_memory=True,
                                   shuffle=True, drop_last=True)
-    val_dataset = ThousandLandmarksDataset(os.path.join(args.data, "train"), train_transforms, split="val")
-    val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, num_workers=8, pin_memory=True,
+    val_dataset = ThousandLandmarksDataset(os.path.join(args.data, "train"), test_transforms, split="val")
+    val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, num_workers=11, pin_memory=True,
                                 shuffle=False, drop_last=False)
 
     device = torch.device("cuda:0") if args.gpu and torch.cuda.is_available() else torch.device("cpu")
 
     print("Creating model...")
-    # model = models.resnet34(pretrained=True)
-    model = models.regnet_x_800mf(pretrained=True)
-    model.requires_grad_(True)
-
-    model.fc = nn.Linear(model.fc.in_features, 2 * NUM_PTS, bias=True)
-    model.fc.requires_grad_(True)
-
-    # model = models.efficientnet_b2(pretrained=True)
-    # model.requires_grad_(True)
+    model = models.regnet_y_8gf(pretrained=True)
+    model.requires_grad_(False)
     # model.classifier = nn.Sequential(
-    #     nn.Dropout(p=0.3, inplace=True),
-    #     nn.Linear(in_features=1408, out_features=2 * NUM_PTS, bias=True)
+    #     nn.LayerNorm([768, 1, 1], eps=1e-06, elementwise_affine=True),
+    #     nn.Flatten(start_dim=1, end_dim=-1),
+    #     nn.Linear(in_features=768, out_features=2 * NUM_PTS, bias=True)
     # )
     # model.classifier.requires_grad_(True)
-
+    model.fc = nn.Linear(model.fc.in_features, 2 * NUM_PTS, bias=True)
+    model.fc.requires_grad_(True)
     model.to(device)
 
-    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, amsgrad=True)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer=optimizer,
-        mode='min',
-        factor=0.2,
-        cooldown=4,
-        patience=2,
-        verbose=True
+    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+    optimizer1 = optim.Adam(model.parameters(), lr=0.1)
+    # scheduler1 = optim.lr_scheduler.ReduceLROnPlateau(
+    #     optimizer=optimizer,
+    #     mode='min',
+    #     factor=0.5,
+    #     cooldown=5,
+    #     patience=3,
+    #     verbose=True
+    # )
+    scheduler1 = optim.lr_scheduler.StepLR(
+        optimizer1, step_size=len(train_dataloader) // 6, gamma=0.5
     )
-    # loss_fn = fnn.mse_loss
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer,
+        T_0=len(train_dataloader),
+        T_mult=2,
+        eta_min=1e-6,
+        last_epoch=-1,
+    )
+
     loss_fn = fnn.l1_loss
 
     # 2. train & validate
     print("Ready for training...")
     best_val_loss = np.inf
+    train_loss = train(model, train_dataloader, loss_fn, optimizer1, scheduler=scheduler1, device=device)
+    val_loss, real_val_loss = validate(model, val_dataloader, loss_fn, device=device)
+    print(f"Epoch #-1:\ttrain loss: {round(train_loss, 3)}\tval loss: {round(val_loss, 3)}\treal val loss: {round(real_val_loss, 3)}")
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        with open(os.path.join("runs", f"{args.name}_best.pth"), "wb") as fp:
+            torch.save(model.state_dict(), fp)
+    model.requires_grad_(True)
+
+    # 2. train & validate
     for epoch in range(args.epochs):
-        train_loss = train(model, train_dataloader, loss_fn, optimizer, device=device)
-        val_loss = validate(model, val_dataloader, loss_fn, device=device)
-        scheduler.step(val_loss)
-        print(f"Epoch #{epoch}:\ttrain loss: {round(train_loss, 3)}\tval loss: {round(val_loss, 3)}")
+        train_loss = train(model, train_dataloader, loss_fn, optimizer, scheduler=scheduler, device=device)
+        val_loss, real_val_loss = validate(model, val_dataloader, loss_fn, device=device)
+        print(f"Epoch #{epoch}:\ttrain loss: {round(train_loss, 3)}\tval loss: {round(val_loss, 3)}\treal val loss: {round(real_val_loss, 3)}")
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             with open(os.path.join("runs", f"{args.name}_best.pth"), "wb") as fp:
                 torch.save(model.state_dict(), fp)
 
     # 3. predict
-    test_dataset = ThousandLandmarksDataset(os.path.join(args.data, "test"), train_transforms, split="test")
-    test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=8, pin_memory=True,
+    test_dataset = ThousandLandmarksDataset(os.path.join(args.data, "test"), test_transforms, split="test")
+    test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=11, pin_memory=True,
                                  shuffle=False, drop_last=False)
 
     with open(os.path.join("runs", f"{args.name}_best.pth"), "rb") as fp:

@@ -21,7 +21,7 @@ SUBMISSION_HEADER = "file_name,Point_M0_X,Point_M0_Y,Point_M1_X,Point_M1_Y,Point
 class ScaleMinSideToSize(object):
     def __init__(self, size=(CROP_SIZE, CROP_SIZE), elem_name='image'):
         # self.size = torch.tensor(size, dtype=torch.float)
-        self.size = np.asarray(size, dtype=np.float)
+        self.size = np.asarray(size, dtype=float)
         self.elem_name = elem_name
 
     def __call__(self, sample):
@@ -78,9 +78,12 @@ class TransformByKeys(object):
 
 
 class ThousandLandmarksDataset(data.Dataset):
-    def __init__(self, root, transforms, split="train"):
+    def __init__(self, root, transforms, image_augmentations=None, key_points_augmentations=None, split="train"):
         super(ThousandLandmarksDataset, self).__init__()
         self.root = root
+        self.image_augmentations = image_augmentations
+        self.key_points_augmentations = key_points_augmentations
+        self.split = split
         landmark_file_name = os.path.join(root, 'landmarks.csv') if split != "test" \
             else os.path.join(root, "test_points.csv")
         images_root = os.path.join(root, "images")
@@ -127,8 +130,12 @@ class ThousandLandmarksDataset(data.Dataset):
         sample["image"] = image
 
         if self.transforms is not None:
+            if self.split == 'train':
+                sample['image'] = self.image_augmentations(image=sample['image'])['image']
+                transformed = self.key_points_augmentations(image=sample['image'], keypoints=sample['landmarks'])
+                sample['image'] = transformed['image']
+                sample['landmarks'] = torch.Tensor(transformed['keypoints'])
             sample = self.transforms(sample)
-
         return sample
 
     def __len__(self):
@@ -164,5 +171,5 @@ def create_submission(path_to_data, test_predictions, path_to_submission_file):
         file_name = row[0]
         point_index_list = np.array(eval(row[1]))
         points_for_image = test_predictions[i]
-        needed_points = points_for_image[point_index_list].astype(np.int)
+        needed_points = points_for_image[point_index_list].astype(float)
         wf.write(file_name + ',' + ','.join(map(str, needed_points.reshape(2 * len(point_index_list)))) + '\n')
