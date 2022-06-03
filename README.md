@@ -16,12 +16,14 @@
 | #  | Topics 								| Link 									|
 | -- | ---------------------------------------------------- | --------------------------------------------------------- |
 | 01 | Введение в CV. Аугментации изображений.      		| [contents](computer_vision/seminar01_opencv_augment) 	|
-| 02 | Архитектуры CNN (I). ResNets. 		    		| [contents](computer_vision/seminar02_resnets)			|
+| 02 | Архитектуры CNN (I). ResNets. 		    		    | [contents](computer_vision/seminar02_resnets)			|
 | 03 | Архитектуры CNN (II). Finetuning. 		    		| [contents](computer_vision/seminar03_transfer_learning)	|
 | 04 | Детектирование (I). Two-stage models. *-RCNN.		| [contents](computer_vision/seminar04_objdet_rcnn)		|
-| 05 | Детектирование (I). One-stage models. RetinaNet.	| [contents](computer_vision/seminar05_objdet_retina)		|
-| 06 | Сегментация. Inplace-ABN. UNet.				| [contents](computer_vision/seminar06-segmentation)		|
-
+| 05 | Детектирование (I). One-stage models. RetinaNet. 	| [contents](computer_vision/seminar05_objdet_retina)		|
+| 06 | Сегментация. Inplace-ABN. UNet.			        	| [contents](computer_vision/seminar06_segmentation)	
+| 07 | Рекуррентные сети в компьютерном зрении. CRNN.       | TBA		|
+| 08 | Metric Learning.     				                | TBA		|
+| 09 | Трекинг. Фильтр Калмана.     				        | [contents](computer_vision/seminar09_tracking)		|
 
 
 #### Homeworks
