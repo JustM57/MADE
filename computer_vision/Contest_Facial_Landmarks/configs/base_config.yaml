@@ -1,0 +1,3 @@
+input_data_path: "data/raw/train.csv"
+crop_size: 224
+learning_rate: 0.001

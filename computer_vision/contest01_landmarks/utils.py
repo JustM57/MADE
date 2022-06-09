@@ -7,19 +7,21 @@ import torch
 import tqdm
 from torch.utils import data
 
-np.random.seed(1234)
-torch.manual_seed(1234)
+np.random.seed(57)
+torch.manual_seed(57)
 
 TRAIN_SIZE = 0.8
 NUM_PTS = 971
-CROP_SIZE = 128
+CROP_SIZE = 224
+DATASET_MEAN = [0.485, 0.456, 0.406]
+DATASET_STD = [0.229, 0.224, 0.225]
 SUBMISSION_HEADER = "file_name,Point_M0_X,Point_M0_Y,Point_M1_X,Point_M1_Y,Point_M2_X,Point_M2_Y,Point_M3_X,Point_M3_Y,Point_M4_X,Point_M4_Y,Point_M5_X,Point_M5_Y,Point_M6_X,Point_M6_Y,Point_M7_X,Point_M7_Y,Point_M8_X,Point_M8_Y,Point_M9_X,Point_M9_Y,Point_M10_X,Point_M10_Y,Point_M11_X,Point_M11_Y,Point_M12_X,Point_M12_Y,Point_M13_X,Point_M13_Y,Point_M14_X,Point_M14_Y,Point_M15_X,Point_M15_Y,Point_M16_X,Point_M16_Y,Point_M17_X,Point_M17_Y,Point_M18_X,Point_M18_Y,Point_M19_X,Point_M19_Y,Point_M20_X,Point_M20_Y,Point_M21_X,Point_M21_Y,Point_M22_X,Point_M22_Y,Point_M23_X,Point_M23_Y,Point_M24_X,Point_M24_Y,Point_M25_X,Point_M25_Y,Point_M26_X,Point_M26_Y,Point_M27_X,Point_M27_Y,Point_M28_X,Point_M28_Y,Point_M29_X,Point_M29_Y\n"
 
 
 class ScaleMinSideToSize(object):
     def __init__(self, size=(CROP_SIZE, CROP_SIZE), elem_name='image'):
         # self.size = torch.tensor(size, dtype=torch.float)
-        self.size = np.asarray(size, dtype=np.float)
+        self.size = np.asarray(size, dtype=float)
         self.elem_name = elem_name
 
     def __call__(self, sample):
@@ -76,9 +78,12 @@ class TransformByKeys(object):
 
 
 class ThousandLandmarksDataset(data.Dataset):
-    def __init__(self, root, transforms, split="train"):
+    def __init__(self, root, transforms, image_augmentations=None, key_points_augmentations=None, split="train"):
         super(ThousandLandmarksDataset, self).__init__()
         self.root = root
+        self.image_augmentations = image_augmentations
+        self.key_points_augmentations = key_points_augmentations
+        self.split = split
         landmark_file_name = os.path.join(root, 'landmarks.csv') if split != "test" \
             else os.path.join(root, "test_points.csv")
         images_root = os.path.join(root, "images")
@@ -125,8 +130,12 @@ class ThousandLandmarksDataset(data.Dataset):
         sample["image"] = image
 
         if self.transforms is not None:
+            if self.split == 'train':
+                sample['image'] = self.image_augmentations(image=sample['image'])['image']
+                transformed = self.key_points_augmentations(image=sample['image'], keypoints=sample['landmarks'])
+                sample['image'] = transformed['image']
+                sample['landmarks'] = torch.Tensor(transformed['keypoints'])
             sample = self.transforms(sample)
-
         return sample
 
     def __len__(self):
@@ -162,5 +171,5 @@ def create_submission(path_to_data, test_predictions, path_to_submission_file):
         file_name = row[0]
         point_index_list = np.array(eval(row[1]))
         points_for_image = test_predictions[i]
-        needed_points = points_for_image[point_index_list].astype(np.int)
+        needed_points = points_for_image[point_index_list].astype(float)
         wf.write(file_name + ',' + ','.join(map(str, needed_points.reshape(2 * len(point_index_list)))) + '\n')
